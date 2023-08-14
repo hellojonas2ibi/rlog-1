@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"time"
@@ -42,7 +44,7 @@ type entry struct {
 
 func handleConnection(conn net.Conn) {
 	buffer := bytes.NewBuffer(make([]byte, 0))
-	chunk := make([]byte, 1024)
+	// chunk := make([]byte, 1024)
 	processData := make(chan bool)
 	resume := make(chan bool)
 	go func(buffer *bytes.Buffer) {
@@ -52,8 +54,9 @@ func handleConnection(conn net.Conn) {
 			log.Printf("[ERROR] failed setting read deadline. %v\n", err)
 		}
 		ticker := time.NewTicker(time.Duration(10) * time.Second)
+        reader := bufio.NewReader(conn)
+        tp := textproto.NewReader(reader)
 		for {
-			// Close this goroutine when client is closed
 			select {
 			case <-ticker.C:
 				processData <- true
@@ -63,15 +66,19 @@ func handleConnection(conn net.Conn) {
 					continue
 				}
 			default:
-				_, err := conn.Read(chunk)
+                line, err := tp.ReadLineBytes()
 				if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
 					log.Printf("[ERROR] timeout, closed connection. %v\n", err)
 					return
-				} else if err != nil {
+				} else if err == io.EOF {
+                    time.Sleep(time.Duration(10) * time.Second)
 					continue
 				}
-				trimmedChunk := bytes.Trim(chunk, "\u0000")
-				if _, err := buffer.Write(trimmedChunk); err != nil {
+                if len(line) == 0 {
+                    continue
+                }
+                line = append(line, byte('\n'))
+				if _, err := buffer.Write(line); err != nil {
 					log.Printf("[ERROR] failed writing chunk. %v\n", err)
 				}
 				deadline = time.Now().Add(time.Duration(10) * time.Minute)
