@@ -12,12 +12,13 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
 func main() {
-	host := ""
-	port := "9898"
+	host := getenv("RLOG_HOST", "")
+	port := getenv("RLOG_PORT", "9898")
 	protocol := "tcp"
 	address := fmt.Sprintf("%s:%s", host, port)
 	server, err := net.Listen(protocol, address)
@@ -57,7 +58,12 @@ func readData(conn net.Conn, buffer *bytes.Buffer, cData chan bool, cResume chan
 	if err := conn.SetDeadline(deadline); err != nil {
 		log.Printf("[ERROR] failed setting read deadline. %v\n", err)
 	}
-	ticker := time.NewTicker(10 * time.Second)
+	interval := 10
+	intervalCfg := getenv("RLOG_INTERVAL", "10")
+	if i, err := strconv.Atoi(intervalCfg); err != nil {
+		interval = i
+	}
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	reader := bufio.NewReader(conn)
 	tp := textproto.NewReader(reader)
 	for {
@@ -127,7 +133,6 @@ func processData(buffer *bytes.Buffer, cData chan bool, cResume chan bool) {
 
 func persistEntries(entryGroup map[string][]byte) {
 	for group, entries := range entryGroup {
-		log.Printf("persisiting %d bytes on group %s", len(entries), group)
 		file, err := openLogFile(group)
 		if err != nil {
 			log.Printf("[ERROR] failed opening log file. %v\n", err)
@@ -165,4 +170,12 @@ func openLogFile(group string) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
+}
+
+func getenv(key string, fallback string) string {
+	value := os.Getenv(key)
+	if len(value) == 0 {
+		return fallback
+	}
+	return value
 }
