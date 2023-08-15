@@ -44,83 +44,85 @@ type entry struct {
 
 func handleConnection(conn net.Conn) {
 	buffer := bytes.NewBuffer(make([]byte, 0))
-	// chunk := make([]byte, 1024)
-	processData := make(chan bool)
-	resume := make(chan bool)
-	go func(buffer *bytes.Buffer) {
-		defer conn.Close()
-		deadline := time.Now().Add(time.Duration(10) * time.Minute)
-		if err := conn.SetDeadline(deadline); err != nil {
-			log.Printf("[ERROR] failed setting read deadline. %v\n", err)
-		}
-		ticker := time.NewTicker(time.Duration(10) * time.Second)
-        reader := bufio.NewReader(conn)
-        tp := textproto.NewReader(reader)
-		for {
+	cData := make(chan bool)
+	cResume := make(chan bool)
+	go readData(conn, buffer, cData, cResume)
+	go processData(buffer, cData, cResume)
+}
+
+func readData(conn net.Conn, buffer *bytes.Buffer, cData chan bool, cResume chan bool) {
+	// TODO: stop this goroutine when client disconnects
+	defer conn.Close()
+	deadline := time.Now().Add(time.Duration(10) * time.Minute)
+	if err := conn.SetDeadline(deadline); err != nil {
+		log.Printf("[ERROR] failed setting read deadline. %v\n", err)
+	}
+	ticker := time.NewTicker(10 * time.Second)
+	reader := bufio.NewReader(conn)
+	tp := textproto.NewReader(reader)
+	for {
+		select {
+		case <-ticker.C:
+			cData <- true
 			select {
-			case <-ticker.C:
-				processData <- true
-				select {
-				case <-resume:
-                    buffer.Reset()
-					continue
-				}
-			default:
-                line, err := tp.ReadLineBytes()
-				if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
-					log.Printf("[ERROR] timeout, closed connection. %v\n", err)
-					return
-				} else if err == io.EOF {
-                    time.Sleep(time.Duration(10) * time.Second)
-					continue
-				}
-                if len(line) == 0 {
-                    continue
-                }
-                line = append(line, byte('\n'))
-				if _, err := buffer.Write(line); err != nil {
-					log.Printf("[ERROR] failed writing chunk. %v\n", err)
-				}
-				deadline = time.Now().Add(time.Duration(10) * time.Minute)
-				if err := conn.SetDeadline(deadline); err != nil {
-					log.Printf("[ERROR] failed setting read deadline. %v\n", err)
-				}
+			case <-cResume:
+				buffer.Reset()
+				continue
+			}
+		default:
+			line, err := tp.ReadLineBytes()
+			if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+				log.Printf("[ERROR] timeout, closed connection. %v\n", err)
+				return
+			} else if err == io.EOF {
+				time.Sleep(time.Duration(10) * time.Second)
+				continue
+			}
+			if len(line) == 0 {
+				continue
+			}
+			line = append(line, byte('\n'))
+			if _, err := buffer.Write(line); err != nil {
+				log.Printf("[ERROR] failed writing chunk. %v\n", err)
+			}
+			deadline = time.Now().Add(time.Duration(10) * time.Minute)
+			if err := conn.SetDeadline(deadline); err != nil {
+				log.Printf("[ERROR] failed setting read deadline. %v\n", err)
 			}
 		}
-	}(buffer)
-	scanner := bufio.NewScanner(buffer)
-	go func(scanner *bufio.Scanner) {
-		entries := make(map[string][]byte)
-		for {
-			// TODO: stop this goroutine whe client is closed
-			select {
-			case <-processData:
-				var line []byte
-				var e entry
-                count := 0
-				for scanner.Scan() {
-                    fmt.Println(count)
-                    count++
-					part := scanner.Bytes()
-                    if len(part) == 0 {
-                        continue
-                    }
-                    // fmt.Println(part)
-					if err := json.Unmarshal(part, &e); err != nil {
-						log.Printf("[ERROR] failed unmarshalling json data. %v\n", err)
-						continue
-					}
-					part = append(part, byte('\n'))
-					line = append(line, part...)
-					entries[e.Group] = line
+	}
+}
+
+func processData(buffer *bytes.Buffer, cData chan bool, cResume chan bool) {
+	// TODO: stop this goroutine when client disconnects
+	entries := make(map[string][]byte)
+	for {
+		select {
+		case <-cData:
+			scanner := bufio.NewScanner(buffer)
+			var e entry
+			for scanner.Scan() {
+				part := scanner.Bytes()
+				if scanner.Err() != nil {
+					break
 				}
-				if len(entries) > 0 {
-					persistEntries(entries)
-					resume <- true
+				if len(part) == 0 {
+					continue
 				}
+				if err := json.Unmarshal(part, &e); err != nil {
+					log.Printf("[ERROR] failed unmarshalling json data. %v\n", err)
+					continue
+				}
+				part = append(part, byte('\n'))
+				lines := entries[e.Group]
+				entries[e.Group] = append(lines, part...)
 			}
+			if len(entries) > 0 {
+				persistEntries(entries)
+			}
+			cResume <- true
 		}
-	}(scanner)
+	}
 }
 
 func persistEntries(entryGroup map[string][]byte) {
@@ -152,20 +154,15 @@ func openLogFile(group string) (*os.File, error) {
 	if err == nil {
 		return file, nil
 	}
-
 	stat, err := os.Stat(logDir)
-
 	if (err != nil && os.IsNotExist(err)) || !stat.IsDir() {
 		if err = os.MkdirAll(logDir, os.ModePerm); err != nil {
 			return nil, err
 		}
 	}
-
-	file, err = os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.ModePerm)
-
+	file, err = os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.ModePerm)
 	if err != nil {
 		return nil, err
 	}
-
 	return file, nil
 }

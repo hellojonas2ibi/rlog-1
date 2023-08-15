@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -44,24 +45,39 @@ func TestSendLogs(t *testing.T) {
 		t.Fatalf("error dialing server. %v\n", err)
 	}
 	defer client.Close()
-	groups := 1
-	lines := 100
-	for i := 0; i < groups; i++ {
-		for j := 0; j < lines; j++ {
-			e := entry{
-				Group:   "group1",
-				Time:    time.Now(),
-				Level:   "INFO",
-				Message: fmt.Sprintf("Log entry number %4d", j),
-			}
-			bEntry, err := json.Marshal(e)
-			if err != nil {
-				t.Fatalf("error marshalling log entry. %v\n", err)
-			}
-			bEntry = append(bEntry, byte('\n'))
-			if _, err = client.Write(bEntry); err != nil {
-				t.Fatalf("error writing log entry. %v\n", err)
+	groups := 30
+	lines := 10000
+	wg := sync.WaitGroup{}
+	jsonData := make(chan []byte)
+	go func() {
+		for {
+			select {
+			case data := <-jsonData:
+				client.Write(data)
 			}
 		}
+	}()
+	for i := 0; i < groups; i++ {
+		wg.Add(1)
+		go func(group int) {
+			for j := 0; j < lines; j++ {
+				e := entry{
+					Group:   fmt.Sprintf("group%04d", group+1),
+					Time:    time.Now(),
+					Level:   "INFO",
+					Message: fmt.Sprintf("Log entry number %04d", j+1),
+				}
+				bEntry, err := json.Marshal(e)
+				if err != nil {
+					continue
+				}
+				bEntry = append(bEntry, byte('\n'))
+				jsonData <- bEntry
+				time.Sleep(time.Millisecond * 50)
+			}
+			wg.Done()
+		}(i)
 	}
+	wg.Wait()
+	time.Sleep(time.Minute * 10)
 }
